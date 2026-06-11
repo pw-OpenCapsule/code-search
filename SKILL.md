@@ -97,8 +97,9 @@ lark-cli im +messages-send --chat-id <oc_xxx> --as user --json \
 
 ```bash
 CHAT_ID=<oc_xxx>; MSG_ID=<om_xxx>; deadline=$(( $(date +%s) + 900 ))
+START_ISO=<提问时刻的ISO时间，如 2026-06-11T07:47:00Z>   # 多人同时提问刷屏时，回复也不会掉出查询窗口
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  replies=$(lark-cli im +chat-messages-list --chat-id "$CHAT_ID" --json 2>/dev/null \
+  replies=$(lark-cli im +chat-messages-list --chat-id "$CHAT_ID" --start "$START_ISO" --page-size 50 --json 2>/dev/null \
     | jq --arg mid "$MSG_ID" '[.data.messages[]? | select(.reply_to == $mid and .sender.sender_type == "app")]')
   status=$(jq -r '
     def part: .content | capture("\\((?<k>\\d+)/(?<n>\\d+)\\)\\s*$") // null;
@@ -123,8 +124,9 @@ done
 - **群只支持代码查询**，不要往群里发无关内容（机器人会拒绝闲聊）。
 - **禁止用 `lark-cli event consume` 等事件方式监听回复**：lark-cli 是全员共享的同一个应用（app），飞书事件在同一应用的多个长连接间负载均衡——你建连接会随机"抢走"服务端答题机器人的事件，直接弄坏整个查询服务。只用轮询。
 - 发消息前把**收件群 + 消息内容**给用户过目（首次使用时）；用户已明确发起查询的，直接发。
-- 等待期间不要每隔几秒高频轮询，20 秒一次足够。
-- 超时（15 分钟）没回复：提醒用户稍后用 `+chat-messages-list` 再查，或去群里看。
+- 等待期间不要每隔几秒高频轮询，20 秒一次足够（lark-cli 全员共享一个 app，限流按 app 计，自觉省着用）。
+- **多人同时提问是支持的**：回复靠 `reply_to` 串到各自的提问，不会拿错答案；但服务端答题大概率排队，高峰期回复会明显变慢——超时可以从 900 调大到 1800。
+- 超时没回复：提醒用户稍后用 `+chat-messages-list` 再查，或去群里看。
 
 ## 常见错误
 

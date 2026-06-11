@@ -17,11 +17,16 @@ INTERVAL="${4:-20}"
 command -v lark-cli >/dev/null || { echo "lark-cli not installed" >&2; exit 3; }
 command -v jq >/dev/null || { echo "jq not installed" >&2; exit 3; }
 
+start_epoch=$(( $(date +%s) - 120 ))
 deadline=$(( $(date +%s) + TIMEOUT ))
+# 用提问时间做窗口起点：多人同时提问把群刷屏时，回复也不会掉出查询范围
+START_ISO=$(date -u -r "$start_epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+  || date -u -d "@$start_epoch" +"%Y-%m-%dT%H:%M:%SZ")
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  # 取群最近消息，筛出"回复我们那条提问"的机器人消息（sender_type == app）
-  replies=$(lark-cli im +chat-messages-list --chat-id "$CHAT_ID" --json 2>/dev/null \
+  # 取提问之后的群消息，筛出"回复我们那条提问"的机器人消息（sender_type == app）
+  replies=$(lark-cli im +chat-messages-list --chat-id "$CHAT_ID" \
+      --start "$START_ISO" --page-size 50 --json 2>/dev/null \
     | jq --arg mid "$MSG_ID" \
         '[.data.messages[]? | select(.reply_to == $mid and .sender.sender_type == "app")]' \
     || echo '[]')
