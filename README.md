@@ -96,7 +96,7 @@ code-search/
 
 ## 相关项目
 
-- [openapi-lark](https://github.com/pw-OpenCapsule/openapi-lark) — OpenAPI 接口文档同步到飞书 wiki（查接口文档用它，查代码用本项目）
+- openapi-lark — OpenAPI 接口文档同步到飞书 wiki（查接口文档用它，查代码用本项目）
 - [lark-cli](https://www.npmjs.com/package/@larksuite/cli) — 本 skill 依赖的飞书命令行
 
 ## License
