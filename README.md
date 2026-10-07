@@ -15,7 +15,7 @@
 
 公司全量代码镜像在远端 `/var/lib/codex-review/work/`，飞书「代码查询」群里的 **Lark CLI** 机器人接到 @ 提问后检索镜像，几分钟内回复文件路径 + 行号 + 关键代码的完整分析。
 
-装上本 skill 后，你只要**跟自己的 agent（Claude Code / Cursor 等）说人话**，发问、@ 机器人、等回复、整理答案全部由 agent 自动完成——回复到达时 agent 会被自动唤醒，不用人盯群。
+装上本 skill 后，你只要**跟自己的 agent（Claude Code / Cursor 等）说人话**，发问、@ 机器人、等回复、整理答案全部由 agent 自动完成——可用 harness 的后台完成通知继续处理；也支持通过 OCS 通知另一个 agent。
 
 ## 安装
 
@@ -50,7 +50,7 @@ lark-cli auth status            # 验证
 | 报错定位 | 这段报错对应哪段代码？（贴日志） |
 | 指定分支 | 基于 feature/xxx 分支查……（不说分支默认查 dev） |
 
-agent 会自动：定位群 → @Lark CLI 机器人发问（带上分支）→ 后台等回复（3～10 分钟，期间继续干别的活）→ 回复到达自动唤醒 → 校验分支 → 整理成结构化答案给你。
+agent 会自动：定位群 → @Lark CLI 机器人发问（带上分支）→ 后台等回复（3～10 分钟，期间继续干别的活）→ 后台完成通知（需要 harness 支持）→ 校验分支 → 整理成结构化答案给你。
 
 ## 实际效果
 
@@ -75,24 +75,42 @@ agent 会自动：定位群 → @Lark CLI 机器人发问（带上分支）→ �
 - ❌ 一次塞多个问题
 - ❌ 在群里闲聊（机器人只回代码问题）
 
-## 仓库结构
+## 工作机制
 
-```
-code-search/
-├── SKILL.md              # agent 读的技能定义（npx skills add 装的就是它）
-├── scripts/
-│   └── wait-reply.sh     # 轮询等回复脚本：回复集齐即退出，唤醒 agent
-└── README.md
+客户端仍通过飞书发问。默认等待模式每 20 秒拉取回复，自动翻页、读取问题的话题回复；按消息 ID 去重，按分片编号拼接。指定问题有话题 ID 后，后续只查询该话题。完整答案才退出，请求错误与等待超时分别返回。
+
+```bash
+bash scripts/wait-reply.sh <chat_id> <message_id> 900 20
 ```
 
-## 工作机制（给好奇的人）
+需要 Python 3.9+ 和已登录的 lark-cli，不再需要 jq。原来的四个位置参数保持兼容。延迟启动等待任务时，用 `--start '<提问时间 ISO 8601>'` 保留查询窗口。Windows 可直接运行 `python scripts/wait_reply.py ...`。
 
-1. `lark-cli im +chat-search` 定位「代码查询」群，`chat.members bots` 解析机器人 open_id
-2. `+messages-send --as user` 发问，`<at>` 标签 @ 机器人，记下 `message_id`
-3. `scripts/wait-reply.sh` 以**后台任务**运行：每 20 秒拉一次群消息，筛 `reply_to == 提问 message_id` 的机器人回复；长答案的 `(1/2) (2/2)` 分片集齐才算完成；完成即退出 → agent 被唤醒
-4. agent 校验机器人实际查询的分支后，整理成结构化结论
+### 通过 OCS 通知其他 agent
 
-为什么用轮询而不是事件长连接：lark-cli 是全员共享的同一个飞书应用，事件在同一应用的多个长连接间**负载均衡**——本地建连接会随机抢走服务端答题机器人的事件，弄坏整个查询服务。所以严禁 `event consume`，轮询是唯一安全方式。
+[open-cross-session](https://github.com/leeguooooo/open-cross-session) 提供跨会话消息与唤醒。等待脚本可以在答案完整后保存 JSON，再通知指定的本机 agent：
+
+```bash
+bash scripts/wait-reply.sh <chat_id> <message_id> 900 20 \
+  --output '<现有私有目录>/answer-<message_id>.json' \
+  --notify '<目标 OCS 短 ID>'
+```
+
+通知只包含问题 ID 和结果文件路径，不把公司代码写进 OCS 消息。文件按 0600 权限新建，不覆盖已有结果。OCS 通知只尝试一次，结果未知时不会重复发送。OCS 会抑制自我唤醒：通知其他会话用它，通知发起查询的当前会话仍依赖 harness 的后台完成机制。
+
+### 取消轮询需要服务端推送
+
+本仓库只有客户端 skill，答题服务端不在这里。`--source stdin` 已提供结果流入口，收到完整答案后可以保存并通过 OCS 通知；该模式不调用飞书 API。服务端接入步骤和输入格式见 [docs/push.md](docs/push.md)。目前默认路径仍是轮询，不能把本地 OCS 通知当成服务端推送已上线。
+
+客户端不要用共享应用的 `lark-cli event consume` 监听回复：它会和答题服务端争用同一个应用的事件接收连接。改为推送时，应由服务端现有的唯一接收进程转发结果。
+
+## 验证
+
+```bash
+python3 -m unittest discover -s tests -v
+bash -n scripts/wait-reply.sh
+```
+
+测试使用合成回复和模拟 OCS，不向真实群或 agent 发消息。CI 在 Linux/macOS、Python 3.9/3.13 上运行同样的检查。
 
 ## 相关项目
 

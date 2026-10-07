@@ -84,34 +84,43 @@ lark-cli im +messages-send --chat-id <oc_xxx> --as user --json \
 - 固定加一句「请注明你实际查询的分支」——这样答案可校验
 - 有报错就贴日志文本；一次问一个问题
 
-### Step 3 — 后台等回复（agent 主动被唤醒，不要傻等）
+### Step 3 — 收集回复
 
-机器人通常 **3～10 分钟**回复，长答案会拆成 `(1/2)` `(2/2)` 分片。**以后台任务方式**运行轮询，进程退出 = 查询结束，你会被自动唤醒，期间可以继续干别的：
-
-```bash
-# 仓库自带脚本（skill 安装目录 scripts/wait-reply.sh）；没有脚本时用下面的内联版
-./scripts/wait-reply.sh <oc_xxx> <om_xxx> 900 20
-```
-
-内联版（无脚本依赖，逻辑相同——轮询群消息，筛 `reply_to == 提问message_id && sender_type == "app"`，分片集齐才算完成）：
+先记下提问时间，再立即启动脚本。默认等待 900 秒，每 20 秒查询一次；完整答案输出到 stdout。用 harness 支持的后台任务运行，保留 task/session ID；只有 harness 支持后台完成通知时，任务退出才会主动通知你。
 
 ```bash
-CHAT_ID=<oc_xxx>; MSG_ID=<om_xxx>; deadline=$(( $(date +%s) + 900 ))
-START_ISO=<提问时刻的ISO时间，如 2026-06-11T07:47:00Z>   # 多人同时提问刷屏时，回复也不会掉出查询窗口
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  replies=$(lark-cli im +chat-messages-list --chat-id "$CHAT_ID" --start "$START_ISO" --page-size 50 --json 2>/dev/null \
-    | jq --arg mid "$MSG_ID" '[.data.messages[]? | select(.reply_to == $mid and .sender.sender_type == "app")]')
-  status=$(jq -r '
-    def part: .content | capture("\\((?<k>\\d+)/(?<n>\\d+)\\)\\s*$") // null;
-    if length == 0 then "waiting"
-    elif ([.[] | part] | all(. == null)) then "complete"
-    else ([.[] | part | select(. != null) | .n | tonumber] | max) as $N
-      | if ([.[] | part | select(. != null)] | length) >= $N then "complete" else "partial" end
-    end' <<<"$replies")
-  [ "$status" = "complete" ] && { jq -r 'sort_by(.message_position|tonumber) | .[].content' <<<"$replies"; break; }
-  sleep 20
-done
+# <skill-dir> 是本 skill 的安装目录，不是用户项目的当前目录。
+bash <skill-dir>/scripts/wait-reply.sh <oc_xxx> <om_xxx> 900 20 \
+  --start '<提问时刻的 ISO 8601 时间>' --bot-id '<机器人 sender.id>'
 ```
+
+需要 Python 3.9+，不需要 jq。Windows 直接运行 `python <skill-dir>/scripts/wait_reply.py`，其余参数相同。`--bot-id` 按返回消息里的 `sender.id` 匹配；若成员列表 ID 与 sender ID 类型不同，不要混用，先确认对应关系。省略时接收回复此问题的 app 消息。
+
+脚本会翻页、读取话题回复、按 message_id 去重，只有 `(1/N)` 至 `(N/N)` 全部集齐才完成。指定问题出现 thread_id 后，后续只查询该话题。请求失败会退避重试；连续三次失败单独报错，不当成“机器人没回复”。无分片标记的非空 bot 回复按单条最终答案处理；服务端的进度通知必须使用独立消息类型或另行约定完成标记。
+
+#### OCS 通知另一个 agent
+
+用户明确指定需要通知的 agent 时，可以追加 `--output` 和 `--notify`。目标必须是显式的本机会话地址，不能猜收件人。OCS 抑制自我唤醒，这个参数用于通知其他会话；通知当前会话仍使用 harness 的后台任务机制。
+
+```bash
+bash <skill-dir>/scripts/wait-reply.sh <oc_xxx> <om_xxx> 900 20 \
+  --output '<现有私有目录>/answer-<om_xxx>.json' \
+  --notify '<目标 OCS 短 ID>'
+```
+
+OCS 缺失时按其官方安装方式安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leeguooooo/open-cross-session/main/install.sh | sh
+```
+
+结果先保存为新 JSON 文件（包含内容、回复消息和链接，不覆盖已有文件），再发送一次 OCS 通知；通知只带问题 ID 和本地文件路径。脚本用 `code-search-<问题ID哈希>` 作为 worker 发送身份。退出码 5 表示结果已保存、通知未确认，检查回执，不要重发。OCS 返回成功也不代表目标已读。
+
+#### 服务端接入推送后
+
+`--source stdin` 接收逐行 JSON，期间不调用 lark-cli。只能使用答题服务端或其唯一事件接收进程提供的可信结果流，不要在客户端建立共享飞书应用的事件长连接。具体输入格式见 [推送接入说明](docs/push.md)。服务端尚未接入时继续用默认轮询；OCS 只负责通知 agent，不负责接收飞书回复。
+
+退出码：`0` 答案完整；`2` 等待超时（参数错误也由 argparse 返回 2）；`3` 依赖/输出路径错误；`4` API/数据/流错误；`5` 结果已保存但 OCS 通知未确认；`130` 手动中断。先检查退出码，再按成功或失败处理。
 
 ### Step 4 — 整理答案
 
@@ -122,7 +131,7 @@ done
 ## 注意事项 / 禁忌
 
 - **群只支持代码查询**，不要往群里发无关内容（机器人会拒绝闲聊）。
-- **禁止用 `lark-cli event consume` 等事件方式监听回复**：lark-cli 是全员共享的同一个应用（app），飞书事件在同一应用的多个长连接间负载均衡——你建连接会随机"抢走"服务端答题机器人的事件，直接弄坏整个查询服务。只用轮询。
+- **禁止用 `lark-cli event consume` 等事件方式监听回复**：lark-cli 是全员共享的同一个应用（app），飞书事件在同一应用的多个长连接间负载均衡——你建连接会随机"抢走"服务端答题机器人的事件，直接弄坏整个查询服务。客户端使用安全轮询，或由服务端已有接收进程转发的推送流。
 - 发消息前把**收件群 + 消息内容**给用户过目（首次使用时）；用户已明确发起查询的，直接发。
 - 等待期间不要每隔几秒高频轮询，20 秒一次足够（lark-cli 全员共享一个 app，限流按 app 计，自觉省着用）。
 - **多人同时提问是支持的**：回复靠 `reply_to` 串到各自的提问，不会拿错答案；但服务端答题大概率排队，高峰期回复会明显变慢——超时可以从 900 调大到 1800。
